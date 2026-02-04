@@ -116,6 +116,38 @@ class trace_event:
         _ = exc_type, exc_val, exc_tb  # Unused but required by context manager protocol
         tracer.end(self.name, self.category)
 
+
+def trace_init(category: str = "Initialization"):
+    """Decorator for tracing __init__ methods"""
+    def decorator(func):
+        def wrapper(self, *args, **kwargs):
+            class_name = self.__class__.__name__
+            trace_name = f"{class_name}.__init__"
+            tracer.begin(trace_name, category, args={"class": class_name})
+            try:
+                result = func(self, *args, **kwargs)
+                return result
+            finally:
+                tracer.end(trace_name, category)
+        return wrapper
+    return decorator
+
+
+def trace_method(category: str = "Engram"):
+    """Decorator for tracing arbitrary methods"""
+    def decorator(func):
+        def wrapper(self, *args, **kwargs):
+            class_name = self.__class__.__name__
+            trace_name = f"{class_name}.{func.__name__}"
+            tracer.begin(trace_name, category)
+            try:
+                result = func(self, *args, **kwargs)
+                return result
+            finally:
+                tracer.end(trace_name, category)
+        return wrapper
+    return decorator
+
 ## third-party
 from sympy import isprime
 import numpy as np
@@ -147,6 +179,7 @@ engram_cfg = EngramConfig()
 backbone_config = BackBoneConfig()
 
 class CompressedTokenizer:
+    @trace_init(category="Tokenizer")
     def __init__(
         self,
         tokenizer_name_or_path,
@@ -200,11 +233,13 @@ class CompressedTokenizer:
         return lookup, len(new_tokens)
     
     def _compress(self, input_ids):
-        arr = np.asarray(input_ids, dtype=np.int64)
-        pos_mask = arr >= 0
-        out = arr.copy()
-        valid_ids = arr[pos_mask]
-        out[pos_mask] = self.lookup_table[valid_ids]
+        with trace_event("compress.index", category="Tokenizer"):
+            arr = np.asarray(input_ids, dtype=np.int64)
+            pos_mask = arr >= 0
+            out = arr.copy()
+            valid_ids = arr[pos_mask]
+        with trace_event("compress.lookup_table", category="Tokenizer"):
+            out[pos_mask] = self.lookup_table[valid_ids]
         return out   
     
     def __call__(self, input_ids):
@@ -212,11 +247,12 @@ class CompressedTokenizer:
             return self._compress(input_ids)
             
 class ShortConv(nn.Module):
+    @trace_init(category="Engram")
     def __init__(
-        self, 
-        hidden_size: int, 
-        kernel_size: int = 4, 
-        dilation: int = 1, 
+        self,
+        hidden_size: int,
+        kernel_size: int = 4,
+        dilation: int = 1,
         norm_eps: float = 1e-5,
         hc_mult: int = 4,
         activation: bool = True,
@@ -281,8 +317,9 @@ def find_next_prime(start, seen_primes):
         candidate += 1
 
 class NgramHashMapping:
+    @trace_init(category="Hash")
     def __init__(
-        self, 
+        self,
         engram_vocab_size,
         max_ngram_size,
         n_embed_per_ngram,
@@ -290,7 +327,7 @@ class NgramHashMapping:
         layer_ids,
         tokenizer_name_or_path,
         pad_id,
-        seed,  
+        seed,
     ):
         self.vocab_size_per_ngram = engram_vocab_size
         self.max_ngram_size = max_ngram_size
@@ -401,6 +438,7 @@ class NgramHashMapping:
             return hash_ids_for_all_layers
 
 class MultiHeadEmbedding(nn.Module):
+    @trace_init(category="Engram")
     def __init__(self, list_of_N: List[int], D: int):
         super().__init__()
         self.num_heads = len(list_of_N)
@@ -422,6 +460,7 @@ class MultiHeadEmbedding(nn.Module):
             return output
     
 class Engram(nn.Module):
+    @trace_init(category="Engram")
     def __init__(self, layer_id):
         super().__init__()
         self.layer_id = layer_id
@@ -487,7 +526,8 @@ class Engram(nn.Module):
             return output 
 
 class TransformerBlock(nn.Module):
-    def __init__(self,layer_id):
+    @trace_init(category="Model")
+    def __init__(self, layer_id):
         super().__init__()
         self.attn = lambda x:x
         self.moe  = lambda x:x
