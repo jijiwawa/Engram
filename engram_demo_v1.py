@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 import math
 import json
 import time
+from tqdm import tqdm
 
 ## Chrome Trace Utilities
 class ChromeTracer:
@@ -569,11 +570,12 @@ if __name__ == '__main__':
     # Loop through sequence lengths: 1, 2, 4, 8, ... (15 iterations, 2^n)
     with trace_event("Sequence_Length_Benchmark", category="Model", args={"num_iterations": 15}):
         current_seq_len = 1
-        for i in range(15):
+        total_iterations = 15
+
+        for i in tqdm(range(total_iterations), desc="Running iterations", unit="iter"):
             with trace_event(f"Iteration_{i+1}_seq_len_{current_seq_len}", category="Model", args={"iteration": i+1, "seq_len": current_seq_len}):
                 # Generate random token IDs from 0 to vocab_size-1
                 input_ids = torch.randint(0, vocab_size, (batch_size, current_seq_len), dtype=torch.long)
-                print(f"Iteration {i+1}: seq_len={current_seq_len}, input_ids shape: {input_ids.shape}")
 
                 with trace_event(f"Model_Forward_Pass_seq_len_{current_seq_len}", category="Model", args={"batch_size": B, "seq_len": current_seq_len}):
                     for idx, layer in enumerate(LLM):
@@ -594,7 +596,7 @@ if __name__ == '__main__':
             # Double the sequence length for next iteration
             current_seq_len *= 2
 
-    print("✅ All Iterations Complete!")
+    print(f"✅ All Iterations Complete!")
     print(f"Final input_ids.shape={input_ids.shape}\nFinal output.shape={output.shape}")
 
     # Save trace to JSON file for Chrome trace viewer
