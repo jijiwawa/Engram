@@ -553,13 +553,21 @@ if __name__ == '__main__':
             nn.Linear(backbone_config.hidden_size, backbone_config.vocab_size)
         ]
 
-    text = "Only Alexander the Great could tame the horse Bucephalus."
-    with trace_event("Tokenizer", category="Model"):
-        tokenizer = AutoTokenizer.from_pretrained(engram_cfg.tokenizer_name_or_path,trust_remote_code=True)
-        print("prompt tokenizer vocab size:", tokenizer.vocab_size)
-        input_ids = tokenizer(text,return_tensors='pt').input_ids
+    # Generate random input_ids with length 2048
+    seq_len = 2048
+    batch_size = 1
 
-    B,L = input_ids.shape
+    # text = "Only Alexander the Great could tame the horse Bucephalus."
+    with trace_event("Tokenizer", category="Model", args={"seq_len": seq_len}):
+    # with trace_event("Tokenizer", category="Model"):
+        tokenizer = AutoTokenizer.from_pretrained(engram_cfg.tokenizer_name_or_path,trust_remote_code=True)
+    #     input_ids = tokenizer(text,return_tensors='pt').input_ids
+        vocab_size = len(tokenizer)
+        # Generate random token IDs from 0 to vocab_size-1
+        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), dtype=torch.long)
+        print(f"Generated random input_ids shape: {input_ids.shape}")
+
+    B, L = input_ids.shape
 
     with trace_event("Model_Forward_Pass", category="Model", args={"batch_size": B, "seq_len": L}):
         for idx, layer in enumerate(LLM):
