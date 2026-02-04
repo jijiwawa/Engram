@@ -23,9 +23,98 @@ pip install torch numpy transformers sympy
 """
 
 ## built-in
-from typing import List
+from typing import List, Optional
 from dataclasses import dataclass, field
 import math
+import json
+import time
+
+## Chrome Trace Utilities
+class ChromeTracer:
+    """Chrome Trace Event Profiler - outputs JSON format for chrome://tracing"""
+    def __init__(self):
+        self.events = []
+        self._start_time = time.perf_counter()
+
+    def _get_timestamp_us(self) -> int:
+        """Get timestamp in microseconds"""
+        return int((time.perf_counter() - self._start_time) * 1e6)
+
+    def begin(self, name: str, category: str = "Engram", args: Optional[dict] = None):
+        """Begin a trace event"""
+        self.events.append({
+            "name": name,
+            "cat": category,
+            "ph": "B",  # Begin
+            "ts": self._get_timestamp_us(),
+            "pid": 0,
+            "tid": 0,
+            "args": args or {}
+        })
+
+    def end(self, name: str, category: str = "Engram", args: Optional[dict] = None):
+        """End a trace event"""
+        self.events.append({
+            "name": name,
+            "cat": category,
+            "ph": "E",  # End
+            "ts": self._get_timestamp_us(),
+            "pid": 0,
+            "tid": 0,
+            "args": args or {}
+        })
+
+    def instant(self, name: str, category: str = "Engram", args: Optional[dict] = None):
+        """Add an instant event"""
+        self.events.append({
+            "name": name,
+            "cat": category,
+            "ph": "I",  # Instant
+            "ts": self._get_timestamp_us(),
+            "pid": 0,
+            "tid": 0,
+            "args": args or {}
+        })
+
+    def counter(self, name: str, value: float, category: str = "Engram"):
+        """Add a counter event"""
+        self.events.append({
+            "name": name,
+            "cat": category,
+            "ph": "C",  # Counter
+            "ts": self._get_timestamp_us(),
+            "pid": 0,
+            "tid": 0,
+            "args": {"value": value}
+        })
+
+    def save(self, filepath: str):
+        """Save trace to JSON file for Chrome trace viewer"""
+        with open(filepath, 'w') as f:
+            json.dump({"traceEvents": self.events}, f, indent=2)
+        print(f"✅ Trace saved to: {filepath}")
+
+    def clear(self):
+        """Clear all events"""
+        self.events = []
+
+# Global tracer instance
+tracer = ChromeTracer()
+
+class trace_event:
+    """Context manager for automatic trace begin/end"""
+    def __init__(self, name: str, category: str = "Engram", args: Optional[dict] = None):
+        self.name = name
+        self.category = category
+        self.args = args
+
+    def __enter__(self):
+        tracer.begin(self.name, self.category, self.args)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        _ = exc_type, exc_val, exc_tb  # Unused but required by context manager protocol
+        tracer.end(self.name, self.category)
 
 ## third-party
 from sympy import isprime
@@ -63,7 +152,8 @@ class CompressedTokenizer:
         tokenizer_name_or_path,
     ):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
-        
+        t = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V3", trust_remote_code=True)
+        print("init Compressed Tokenizer Vocab size:", self.tokenizer.vocab_size)
         SENTINEL = "\uE000"
         self.normalizer = normalizers.Sequence([
             normalizers.NFKC(),
@@ -118,7 +208,8 @@ class CompressedTokenizer:
         return out   
     
     def __call__(self, input_ids):
-        return self._compress(input_ids)
+        with trace_event("CompressedTokenizer.compress", category="Tokenizer"):
+            return self._compress(input_ids)
             
 class ShortConv(nn.Module):
     def __init__(
@@ -158,25 +249,29 @@ class ShortConv(nn.Module):
         Input:  (B,L,HC_MULT,D)
         Output: (B,L,HC_MULT,D)
         """
-        B, T, G, C = x.shape
-        
-        assert G == self.hc_mult, f"Input groups {G} != hc_mult {self.hc_mult}"
+        with trace_event("ShortConv.forward", category="Engram"):
+            B, T, G, C = x.shape
 
-        normed_chunks = []
-        for i in range(G):
-            chunk = x[:, :, i, :]
-            normed_chunks.append(self.norms[i](chunk))
-        
-        x_norm = torch.cat(normed_chunks, dim=-1)
-        x_bct = x_norm.transpose(1, 2)
-        y_bct = self.conv(x_bct)
-        y_bct = y_bct[..., :T]
+            assert G == self.hc_mult, f"Input groups {G} != hc_mult {self.hc_mult}"
 
-        if self.activation:
-            y_bct = self.act_fn(y_bct)
-        y = y_bct.transpose(1, 2).view(B, T, G, C).contiguous()
-        
-        return y
+            with trace_event("ShortConv.normalize", category="Engram"):
+                normed_chunks = []
+                for i in range(G):
+                    chunk = x[:, :, i, :]
+                    normed_chunks.append(self.norms[i](chunk))
+
+            with trace_event("ShortConv.convolution", category="Engram"):
+                x_norm = torch.cat(normed_chunks, dim=-1)
+                x_bct = x_norm.transpose(1, 2)
+                y_bct = self.conv(x_bct)
+                y_bct = y_bct[..., :T]
+
+            if self.activation:
+                with trace_event("ShortConv.activation", category="Engram"):
+                    y_bct = self.act_fn(y_bct)
+            y = y_bct.transpose(1, 2).view(B, T, G, C).contiguous()
+
+            return y
     
 def find_next_prime(start, seen_primes):
     candidate = start + 1
@@ -296,11 +391,14 @@ class NgramHashMapping:
         return np.stack(all_hashes, axis=2)
 
     def hash(self, input_ids):
-        input_ids = self.compressed_tokenizer(input_ids)
-        hash_ids_for_all_layers = {}
-        for layer_id in self.layer_ids:
-            hash_ids_for_all_layers[layer_id] = self._get_ngram_hashes(input_ids, layer_id=layer_id)
-        return hash_ids_for_all_layers
+        with trace_event("NgramHashMapping.hash", category="Hash"):
+            with trace_event("NgramHashMapping.compress_tokens", category="Hash"):
+                input_ids = self.compressed_tokenizer(input_ids)
+            hash_ids_for_all_layers = {}
+            for layer_id in self.layer_ids:
+                with trace_event(f"NgramHashMapping.layer_{layer_id}", category="Hash"):
+                    hash_ids_for_all_layers[layer_id] = self._get_ngram_hashes(input_ids, layer_id=layer_id)
+            return hash_ids_for_all_layers
 
 class MultiHeadEmbedding(nn.Module):
     def __init__(self, list_of_N: List[int], D: int):
@@ -318,10 +416,10 @@ class MultiHeadEmbedding(nn.Module):
         self.embedding = nn.Embedding(num_embeddings=total_N, embedding_dim=D)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        shifted_input_ids = input_ids + self.offsets
-        output = self.embedding(shifted_input_ids)
-        
-        return output
+        with trace_event("MultiHeadEmbedding.forward", category="Engram"):
+            shifted_input_ids = input_ids + self.offsets
+            output = self.embedding(shifted_input_ids)
+            return output
     
 class Engram(nn.Module):
     def __init__(self, layer_id):
@@ -360,22 +458,33 @@ class Engram(nn.Module):
         hidden_states: [B, L, HC_MULT, D]
         input_ids: [B, L]
         """
-        hash_input_ids = torch.from_numpy(self.hash_mapping.hash(input_ids)[self.layer_id])
-        embeddings = self.multi_head_embedding(hash_input_ids).flatten(start_dim=-2)
-        gates = []
-        for hc_idx in range(backbone_config.hc_mult):
-            key = self.key_projs[hc_idx](embeddings)
-            normed_key = self.norm1[hc_idx](key)
-            query = hidden_states[:,:,hc_idx,:]
-            normed_query = self.norm2[hc_idx](query)
-            gate = (normed_key * normed_query).sum(dim=-1) / math.sqrt(backbone_config.hidden_size)
-            gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
-            gate = gate.sigmoid().unsqueeze(-1)
-            gates.append(gate)
-        gates = torch.stack(gates,dim=2)
-        value = gates * self.value_proj(embeddings).unsqueeze(2)
-        output = value + self.short_conv(value)
-        return output 
+        with trace_event(f"Engram.layer_{self.layer_id}", category="Engram", args={"layer_id": self.layer_id}):
+            with trace_event("Engram.hash_lookup", category="Engram"):
+                hash_input_ids = torch.from_numpy(self.hash_mapping.hash(input_ids)[self.layer_id])
+
+            with trace_event("Engram.embedding_lookup", category="Engram"):
+                embeddings = self.multi_head_embedding(hash_input_ids).flatten(start_dim=-2)
+
+            with trace_event("Engram.gate_computation", category="Engram"):
+                gates = []
+                for hc_idx in range(backbone_config.hc_mult):
+                    key = self.key_projs[hc_idx](embeddings)
+                    normed_key = self.norm1[hc_idx](key)
+                    query = hidden_states[:,:,hc_idx,:]
+                    normed_query = self.norm2[hc_idx](query)
+                    gate = (normed_key * normed_query).sum(dim=-1) / math.sqrt(backbone_config.hidden_size)
+                    gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
+                    gate = gate.sigmoid().unsqueeze(-1)
+                    gates.append(gate)
+                gates = torch.stack(gates,dim=2)
+
+            with trace_event("Engram.value_computation", category="Engram"):
+                value = gates * self.value_proj(embeddings).unsqueeze(2)
+
+            with trace_event("Engram.short_conv", category="Engram"):
+                output = value + self.short_conv(value)
+
+            return output 
 
 class TransformerBlock(nn.Module):
     def __init__(self,layer_id):
@@ -394,30 +503,47 @@ class TransformerBlock(nn.Module):
         return hidden_states
 
 if __name__ == '__main__':
-    LLM = [
-        nn.Embedding(backbone_config.vocab_size,backbone_config.hidden_size),
-        *[TransformerBlock(layer_id=layer_id) for layer_id in range(backbone_config.num_layers)],
-        nn.Linear(backbone_config.hidden_size, backbone_config.vocab_size)
-    ]
+    # Clear any previous trace events
+    tracer.clear()
+
+    with trace_event("Model_Initialization", category="Model"):
+        LLM = [
+            nn.Embedding(backbone_config.vocab_size,backbone_config.hidden_size),
+            *[TransformerBlock(layer_id=layer_id) for layer_id in range(backbone_config.num_layers)],
+            nn.Linear(backbone_config.hidden_size, backbone_config.vocab_size)
+        ]
 
     text = "Only Alexander the Great could tame the horse Bucephalus."
-    tokenizer = AutoTokenizer.from_pretrained(engram_cfg.tokenizer_name_or_path,trust_remote_code=True)
-    input_ids = tokenizer(text,return_tensors='pt').input_ids
+    with trace_event("Tokenizer", category="Model"):
+        tokenizer = AutoTokenizer.from_pretrained(engram_cfg.tokenizer_name_or_path,trust_remote_code=True)
+        print("prompt tokenizer vocab size:", tokenizer.vocab_size)
+        input_ids = tokenizer(text,return_tensors='pt').input_ids
 
     B,L = input_ids.shape
 
-    for idx, layer in enumerate(LLM):
-        if idx == 0:
-            hidden_states = LLM[0](input_ids)
-            ## mock hyper-connection
-            hidden_states = hidden_states.unsqueeze(2).expand(-1, -1, backbone_config.hc_mult, -1)      
-        elif idx == len(LLM)-1:
-            ## mock hyper-connection
-            hidden_states = hidden_states[:,:,0,:] 
-            output = layer(hidden_states)
-        else:
-            hidden_states = layer(input_ids=input_ids,hidden_states=hidden_states)
+    with trace_event("Model_Forward_Pass", category="Model", args={"batch_size": B, "seq_len": L}):
+        for idx, layer in enumerate(LLM):
+            if idx == 0:
+                with trace_event("Embedding_Layer", category="Model"):
+                    hidden_states = LLM[0](input_ids)
+                    ## mock hyper-connection
+                    hidden_states = hidden_states.unsqueeze(2).expand(-1, -1, backbone_config.hc_mult, -1)
+            elif idx == len(LLM)-1:
+                ## mock hyper-connection
+                hidden_states = hidden_states[:,:,0,:]
+                with trace_event("Output_Layer", category="Model"):
+                    output = layer(hidden_states)
+            else:
+                with trace_event(f"TransformerBlock.layer_{idx}", category="Model"):
+                    hidden_states = layer(input_ids=input_ids,hidden_states=hidden_states)
 
     print("✅ Forward Complete!")
     print(f"{input_ids.shape=}\n{output.shape=}")
+
+    # Save trace to JSON file for Chrome trace viewer
+    tracer.save("engram_trace.json")
+    print("\n💡 To view the trace:")
+    print("   1. Open Chrome browser")
+    print("   2. Navigate to chrome://tracing")
+    print("   3. Click 'Load' and select 'engram_trace.json'")
             
