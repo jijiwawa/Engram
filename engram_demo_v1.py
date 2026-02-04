@@ -553,40 +553,49 @@ if __name__ == '__main__':
             nn.Linear(backbone_config.hidden_size, backbone_config.vocab_size)
         ]
 
-    # Generate random input_ids with length 2048
-    seq_len = 2048
+    # Generate random input_ids with varying sequence lengths
     batch_size = 1
 
     # text = "Only Alexander the Great could tame the horse Bucephalus."
-    with trace_event("Tokenizer", category="Model", args={"seq_len": seq_len}):
+    with trace_event("Tokenizer", category="Model"):
     # with trace_event("Tokenizer", category="Model"):
         tokenizer = AutoTokenizer.from_pretrained(engram_cfg.tokenizer_name_or_path,trust_remote_code=True)
     #     input_ids = tokenizer(text,return_tensors='pt').input_ids
         vocab_size = len(tokenizer)
-        # Generate random token IDs from 0 to vocab_size-1
-        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), dtype=torch.long)
-        print(f"Generated random input_ids shape: {input_ids.shape}")
 
-    B, L = input_ids.shape
+    B = batch_size
+    output = None
 
-    with trace_event("Model_Forward_Pass", category="Model", args={"batch_size": B, "seq_len": L}):
-        for idx, layer in enumerate(LLM):
-            if idx == 0:
-                with trace_event("Embedding_Layer", category="Model"):
-                    hidden_states = LLM[0](input_ids)
-                    ## mock hyper-connection
-                    hidden_states = hidden_states.unsqueeze(2).expand(-1, -1, backbone_config.hc_mult, -1)
-            elif idx == len(LLM)-1:
-                ## mock hyper-connection
-                hidden_states = hidden_states[:,:,0,:]
-                with trace_event("Output_Layer", category="Model"):
-                    output = layer(hidden_states)
-            else:
-                with trace_event(f"TransformerBlock.layer_{idx}", category="Model"):
-                    hidden_states = layer(input_ids=input_ids,hidden_states=hidden_states)
+    # Loop through sequence lengths: 1, 2, 4, 8, ... (15 iterations, 2^n)
+    with trace_event("Sequence_Length_Benchmark", category="Model", args={"num_iterations": 15}):
+        current_seq_len = 1
+        for i in range(15):
+            with trace_event(f"Iteration_{i+1}_seq_len_{current_seq_len}", category="Model", args={"iteration": i+1, "seq_len": current_seq_len}):
+                # Generate random token IDs from 0 to vocab_size-1
+                input_ids = torch.randint(0, vocab_size, (batch_size, current_seq_len), dtype=torch.long)
+                print(f"Iteration {i+1}: seq_len={current_seq_len}, input_ids shape: {input_ids.shape}")
 
-    print("✅ Forward Complete!")
-    print(f"{input_ids.shape=}\n{output.shape=}")
+                with trace_event(f"Model_Forward_Pass_seq_len_{current_seq_len}", category="Model", args={"batch_size": B, "seq_len": current_seq_len}):
+                    for idx, layer in enumerate(LLM):
+                        if idx == 0:
+                            with trace_event(f"Embedding_Layer_seq_{current_seq_len}", category="Model"):
+                                hidden_states = LLM[0](input_ids)
+                                ## mock hyper-connection
+                                hidden_states = hidden_states.unsqueeze(2).expand(-1, -1, backbone_config.hc_mult, -1)
+                        elif idx == len(LLM)-1:
+                            ## mock hyper-connection
+                            hidden_states = hidden_states[:,:,0,:]
+                            with trace_event(f"Output_Layer_seq_{current_seq_len}", category="Model"):
+                                output = layer(hidden_states)
+                        else:
+                            with trace_event(f"TransformerBlock.layer_{idx}_seq_{current_seq_len}", category="Model"):
+                                hidden_states = layer(input_ids=input_ids,hidden_states=hidden_states)
+
+            # Double the sequence length for next iteration
+            current_seq_len *= 2
+
+    print("✅ All Iterations Complete!")
+    print(f"Final input_ids.shape={input_ids.shape}\nFinal output.shape={output.shape}")
 
     # Save trace to JSON file for Chrome trace viewer
     tracer.save("engram_trace.json")
