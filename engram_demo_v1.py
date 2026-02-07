@@ -230,7 +230,8 @@ class CompressedTokenizer:
         lookup = np.empty(vocab_size, dtype=np.int64)
         for tid in range(vocab_size):
             lookup[tid] = old2new[tid]
-
+        print(f"CompressedTokenizer: Reduced vocab size from {vocab_size} to {len(new_tokens)}")
+        print(f"lookup table size: {len(lookup)}")
         return lookup, len(new_tokens)
     
     def _compress(self, input_ids):
@@ -389,6 +390,7 @@ class NgramHashMapping:
                 
                 all_ngram_vocab_sizes.append(current_ngram_heads_sizes)
             vocab_size_across_layers[layer_id] = all_ngram_vocab_sizes
+            print(f"Layer {layer_id} vocab sizes across n-grams and heads: {len(all_ngram_vocab_sizes)}")
             
         return vocab_size_across_layers
 
@@ -574,7 +576,7 @@ if __name__ == '__main__':
         current_seq_len = 1
         benchmark_iterations = 5
 
-        for seq_idx in tqdm(range(15), desc="Sequence Lengths", unit="seq"):
+        for seq_idx in tqdm(range(5), desc="Sequence Lengths", unit="seq"):
             seq_len = 2 ** seq_idx  # 1, 2, 4, 8, 16, ...
 
             # Run 5 benchmarks for this sequence length
